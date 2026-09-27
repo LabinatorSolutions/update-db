@@ -45,6 +45,10 @@ try {
   denoInstalled = false
 }
 
+let pnpmMajor = Number(
+  execSync('pnpm --version').toString().trim().split('.')[0]
+)
+
 let testDir
 test.after.each(async () => {
   process.chdir(__dirname)
@@ -80,9 +84,9 @@ function checkRunUpdateContents(installedVersions, system) {
 
   match(
     runUpdate(),
-    `Latest version:     ${caniuse.version}\n` +
+    `Registry latest:         ${caniuse.version}\n` +
       'Installed version' +
-      (installedVersions.indexOf(',') !== -1 ? 's:' : ': ') +
+      (installedVersions.indexOf(',') !== -1 ? 's:     ' : ':      ') +
       ` ${installedVersions}\n` +
       'Removing old caniuse-lite from lock file\n' +
       'Installing new caniuse-lite version\n' +
@@ -96,8 +100,8 @@ function checkRunUpdateContents(installedVersions, system) {
 function checkRunUpdateNoChanges() {
   match(
     runUpdate(),
-    `Latest version:     ${caniuse.version}\n` +
-      `Installed version:  ${caniuse.version}\n` +
+    `Registry latest:         ${caniuse.version}\n` +
+      `Installed version:       ${caniuse.version}\n` +
       'caniuse-lite is up to date\n'
   )
 }
@@ -276,7 +280,7 @@ if (yarnInstalled) {
 
       match(
         runUpdate(),
-        `Latest version:     ${caniuse.version}\n` +
+        `Registry latest:         ${caniuse.version}\n` +
           'Updating caniuse-lite version\n' +
           '$ yarn up -R caniuse-lite baseline-browser-mapping\n' +
           'caniuse-lite has been successfully updated\n'
@@ -287,20 +291,55 @@ if (yarnInstalled) {
   }
 }
 
-test('updates caniuse-lite for pnpm', async () => {
-  let dir = await chdir('update-pnpm', 'package.json', 'pnpm-lock.yaml')
+const OLD_CANIUSE = '1.0.30001001'
 
-  // Without it pnpm will skip caniuse-lite releases younger than
-  // minimumReleaseAge, while `pnpm info` still reports them as the latest
-  await writeFile(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 0\n')
+async function writePnpmConfig(
+  dir,
+  pin,
+  minimumReleaseAge = 0,
+  strict = false
+) {
+  if (pnpmMajor >= 11) {
+    let config = `minimumReleaseAge: ${minimumReleaseAge}\n`
+    if (strict) config += 'minimumReleaseAgeStrict: true\n'
+    if (pin) config += `overrides:\n  caniuse-lite: ${pin}\n`
+    await writeFile(join(dir, 'pnpm-workspace.yaml'), config)
+  } else {
+    await writeFile(join(dir, '.npmrc'), 'minimum-release-age=0\n')
+    let file = join(dir, 'package.json')
+    let pkg = JSON.parse((await readFile(file)).toString())
+    if (pin) {
+      pkg.pnpm = { overrides: { 'caniuse-lite': pin } }
+    } else {
+      delete pkg.pnpm
+    }
+    await writeFile(file, JSON.stringify(pkg, null, 2) + '\n')
+  }
+}
 
-  match(
-    runUpdate(),
-    `Latest version:     ${caniuse.version}\n` +
-      'Updating caniuse-lite version\n' +
-      '$ pnpm up --depth=Infinity --no-save caniuse-lite\n' +
-      'caniuse-lite has been successfully updated\n'
+async function unpinPnpmLockfile(dir, pin) {
+  let file = join(dir, 'pnpm-lock.yaml')
+  let lock = (await readFile(file)).toString()
+  await writeFile(
+    file,
+    lock.replace(`\noverrides:\n  caniuse-lite: ${pin}\n`, '')
   )
+}
+
+test('updates caniuse-lite for pnpm', async () => {
+  let dir = await chdir('update-pnpm', 'package.json')
+
+  // pnpm reads lockfiles only from a narrow range of its own versions,
+  // so generate the fixture's lockfile with the pnpm we test against
+  await writePnpmConfig(dir, OLD_CANIUSE)
+  execSync('pnpm install --lockfile-only')
+  await writePnpmConfig(dir, null)
+  await unpinPnpmLockfile(dir, OLD_CANIUSE)
+
+  let out = runUpdate()
+  match(out, `Registry latest:         ${caniuse.version}\n`)
+  match(out, '$ pnpm up --depth=9999 --no-save caniuse-lite')
+  match(out, 'caniuse-lite has been successfully updated\n')
 
   let lock = (await readFile(join(dir, 'pnpm-lock.yaml'))).toString()
   ok(
@@ -309,6 +348,82 @@ test('updates caniuse-lite for pnpm', async () => {
   )
 })
 
+function stablePublishTimes(name) {
+  let times = JSON.parse(execSync(`pnpm info ${name} time --json`).toString())
+  let stable = {}
+  for (let version of Object.keys(times)) {
+    let time = Date.parse(times[version])
+    if (/^\d+\.\d+\.\d+$/.test(version) && Number.isFinite(time)) {
+      stable[version] = time
+    }
+  }
+  return stable
+}
+
+if (pnpmMajor >= 11) {
+  test('respects strict pnpm minimumReleaseAge', async () => {
+    let dir = await chdir('update-pnpm', 'package.json')
+
+    // Pick an age gate that is just too strict for the latest release,
+    // so the previous mature release has to be installed instead
+    let times = stablePublishTimes('caniuse-lite')
+    let minutes = Math.ceil((Date.now() - times[caniuse.version]) / 60000) + 1
+    let cutoff = Date.now() - minutes * 60000
+    let expected = Object.keys(times)
+      .filter(version => times[version] <= cutoff)
+      .reduce((a, b) => (times[a] > times[b] ? a : b))
+    ok(expected !== caniuse.version)
+
+    // The fixture’s lockfile must obey the same age gate, like a real
+    // project where `pnpm install` already passed under these settings
+    await writePnpmConfig(dir, OLD_CANIUSE, minutes, true)
+    execSync('pnpm install --lockfile-only')
+    await writePnpmConfig(dir, null, minutes, true)
+    await unpinPnpmLockfile(dir, OLD_CANIUSE)
+
+    let packageBefore = await readFile(join(dir, 'package.json'))
+    let workspaceBefore = await readFile(join(dir, 'pnpm-workspace.yaml'))
+    let out = runUpdate()
+
+    match(out, `Registry latest:         ${caniuse.version}\n`)
+    match(out, 'Strict pnpm minimumReleaseAge detected\n')
+    match(out, `Latest policy-compliant: ${expected}\n`)
+    match(out, '$ pnpm install --lockfile-only (with')
+    match(out, '$ pnpm install --no-frozen-lockfile\n')
+    equal(await readFile(join(dir, 'package.json')), packageBefore)
+    equal(await readFile(join(dir, 'pnpm-workspace.yaml')), workspaceBefore)
+
+    let lock = (await readFile(join(dir, 'pnpm-lock.yaml'))).toString()
+    ok(
+      lock.includes(`/caniuse-lite/${expected}:`) ||
+        lock.includes(`caniuse-lite@${expected}:`)
+    )
+    ok(!lock.includes(`caniuse-lite/${caniuse.version}`))
+    ok(!lock.includes(`caniuse-lite@${caniuse.version}`))
+  })
+
+  test('fails closed when pnpm has no mature caniuse-lite version', async () => {
+    let dir = await chdir('update-pnpm', 'package.json')
+
+    await writePnpmConfig(dir, OLD_CANIUSE)
+    execSync('pnpm install --lockfile-only')
+    await writePnpmConfig(dir, null, 52560000, true)
+    await unpinPnpmLockfile(dir, OLD_CANIUSE)
+
+    let packageBefore = await readFile(join(dir, 'package.json'))
+    let lockBefore = await readFile(join(dir, 'pnpm-lock.yaml'))
+    let workspaceBefore = await readFile(join(dir, 'pnpm-workspace.yaml'))
+
+    throws(
+      runUpdate,
+      /Cannot find a caniuse-lite version old enough for pnpm minimumReleaseAge/
+    )
+    equal(await readFile(join(dir, 'package.json')), packageBefore)
+    equal(await readFile(join(dir, 'pnpm-lock.yaml')), lockBefore)
+    equal(await readFile(join(dir, 'pnpm-workspace.yaml')), workspaceBefore)
+  })
+}
+
 if (bunInstalled) {
   test('updates caniuse-lite for bun', async () => {
     let dir = await chdir('update-bun', 'package.json', 'bun.lockb')
@@ -316,7 +431,7 @@ if (bunInstalled) {
 
     match(
       runUpdate(),
-      `Latest version:     ${caniuse.version}\n` +
+      `Registry latest:         ${caniuse.version}\n` +
         'Updating caniuse-lite version\n' +
         '$ bun install (with a temporary caniuse-lite override)\n' +
         'Removing the temporary override\n' +
@@ -355,7 +470,7 @@ if (denoInstalled) {
 
     match(
       runUpdate(),
-      `Latest version:     ${caniuse.version}\n` +
+      `Registry latest:         ${caniuse.version}\n` +
         'Updating caniuse-lite version\n' +
         '$ deno add npm:caniuse-lite npm:baseline-browser-mapping\n' +
         'Cleaning package.json dependencies from caniuse-lite\n' +
@@ -368,5 +483,30 @@ if (denoInstalled) {
     ok(key.endsWith(caniuse.version))
   })
 }
+
+test('throws error when package manager binary is missing', async () => {
+  await chdir('update-bun', 'package.json', 'bun.lockb')
+  let oldPath = process.env.PATH
+  try {
+    process.env.PATH = ''
+    throws(() => updateDb(), /Cannot find bun binary in PATH/)
+  } finally {
+    process.env.PATH = oldPath
+  }
+})
+
+test('rethrows package manager errors', async () => {
+  let dir = await chdir('update-npm', 'package.json', 'package-lock.json')
+  let binDir = join(dir, 'bin')
+  await mkdir(binDir)
+  await writeFile(join(binDir, 'npm'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  let oldPath = process.env.PATH
+  try {
+    process.env.PATH = binDir + ':' + oldPath
+    throws(() => updateDb(), /Command failed/)
+  } finally {
+    process.env.PATH = oldPath
+  }
+})
 
 test.run()
