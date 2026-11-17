@@ -16,7 +16,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Node.js & pnpm
-        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
           version: 12
           runtime: node@26
@@ -26,6 +26,10 @@ jobs:
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+      - name: Install aube
+        run: |
+          npm install -g --allow-scripts=@endevco/aube @endevco/aube
+          echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
       - name: Install dependencies
         run: pnpm ci
       - name: Run tests
@@ -46,7 +50,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Node.js & pnpm
-        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
           version: 12
           runtime: node@${{ matrix.node }}
@@ -72,11 +76,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 7
       - name: Install Node.js ${{ matrix.node }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -87,18 +91,13 @@ jobs:
   windows:
     name: Windows Node.js Latest
     runs-on: windows-latest
-    strategy:
-      matrix:
-        node:
-          - 24
-          - 22
     steps:
       - name: Checkout the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Node.js & pnpm
-        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
           version: 12
           runtime: node@26
